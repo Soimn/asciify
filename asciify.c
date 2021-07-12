@@ -92,6 +92,7 @@ WindowProc(HWND window_handle, UINT message, WPARAM wparam, LPARAM lparam)
     
     else if (message == WM_KEYDOWN && wparam == 'S' && (GetKeyState(VK_CONTROL) & 0x8000) != 0 && Bitmap != 0)
     {
+        // This is incredibly jank, but it works
         WCHAR path[1024] = {0};
         LPWSTR path_wstr = path;
         
@@ -113,44 +114,51 @@ WindowProc(HWND window_handle, UINT message, WPARAM wparam, LPARAM lparam)
         
         if (file != INVALID_HANDLE_VALUE)
         {
-            BITMAP backbuffer;
-            if (GetObject(Backbuffer, sizeof(BITMAP), &backbuffer))
-            {
-                BITMAPINFO backbuffer_info = {
-                    .bmiHeader.biSize        = sizeof(BITMAPINFOHEADER),
-                    .bmiHeader.biWidth       = backbuffer.bmWidth,
-                    .bmiHeader.biHeight      = backbuffer.bmHeight,
-                    .bmiHeader.biPlanes      = backbuffer.bmPlanes,
-                    .bmiHeader.biBitCount    = backbuffer.bmBitsPixel,
-                    .bmiHeader.biCompression = BI_RGB,
-                    .bmiHeader.biSizeImage   = (((backbuffer.bmWidth * 24 + 31) & ~31) / 8) * backbuffer.bmHeight,
-                };
-                
-                void* bits = VirtualAlloc(0, backbuffer_info.bmiHeader.biSizeImage, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
-                
-                // TODO: which dc?
-                HDC dc = GetDC(0);
-                SelectObject(dc, Backbuffer);
-                if (GetDIBits(dc, Backbuffer, 0, backbuffer_info.bmiHeader.biHeight, bits, &backbuffer_info, DIB_RGB_COLORS))
-                {
-                    BITMAPFILEHEADER header = {
-                        .bfType    = 0x4d42,
-                        .bfSize    = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER) + backbuffer_info.bmiHeader.biSizeImage,
-                        .bfOffBits = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER),
-                    };
-                    
-                    
-                    DWORD bytes_written;
-                    if (WriteFile(file, &header, sizeof(BITMAPFILEHEADER), &bytes_written, 0) &&
-                        WriteFile(file, &backbuffer_info.bmiHeader, sizeof(BITMAPINFOHEADER), &bytes_written, 0) &&
-                        WriteFile(file, bits, backbuffer_info.bmiHeader.biSizeImage, &bytes_written, 0))
-                    {
-                        
-                    }
-                }
-                
-                VirtualFree(bits, 0, MEM_RELEASE);
-            }
+            HDC dc = GetDC(window_handle);
+            
+            HDC bb_dc = CreateCompatibleDC(dc);
+            
+            RECT client_rect;
+            GetClientRect(window_handle, &client_rect);
+            
+            HBITMAP window = CreateCompatibleBitmap(dc, client_rect.right - client_rect.left, client_rect.bottom - client_rect.top);
+            HBITMAP prev_bitmap = SelectObject(bb_dc, window);
+            BitBlt(bb_dc, 0, 0, client_rect.right - client_rect.left, client_rect.bottom - client_rect.top, dc, 0, 0, SRCCOPY);
+            
+            BITMAP window_bitmap;
+            GetObject(window, sizeof(BITMAP), &window_bitmap);
+            
+            BITMAPINFOHEADER bitmap_info = {
+                .biSize        = sizeof(BITMAPINFOHEADER),
+                .biWidth       = window_bitmap.bmWidth,
+                .biHeight      = window_bitmap.bmHeight,
+                .biPlanes      = 1,
+                .biBitCount    = 24,
+                .biCompression = BI_RGB,
+            };
+            
+            u32 bitmap_size = ((window_bitmap.bmWidth * bitmap_info.biBitCount + 31) / 32) * 4 * window_bitmap.bmHeight;
+            
+            void* bitmap_memory = VirtualAlloc(0, bitmap_size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+            
+            GetDIBits(dc, window, 0, window_bitmap.bmHeight, bitmap_memory, (BITMAPINFO*)&bitmap_info, DIB_RGB_COLORS);
+            
+            BITMAPFILEHEADER file_header = {
+                .bfType    = 0x4D42,
+                .bfSize    = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER) + bitmap_size,
+                .bfOffBits = (DWORD)sizeof(BITMAPFILEHEADER) + (DWORD)sizeof(BITMAPINFOHEADER)
+            };
+            
+            DWORD _bw;
+            WriteFile(file, (LPSTR)&file_header, sizeof(BITMAPFILEHEADER), &_bw, 0);
+            WriteFile(file, (LPSTR)&bitmap_info, sizeof(BITMAPINFOHEADER), &_bw, 0);
+            WriteFile(file, (LPSTR)bitmap_memory, bitmap_size, &_bw, 0);
+            
+            DeleteObject(window);
+            DeleteObject(bb_dc);
+            ReleaseDC(window_handle, dc);
+            
+            SelectObject(bb_dc, prev_bitmap);
             
             CloseHandle(file);
         }
@@ -256,8 +264,8 @@ WindowProc(HWND window_handle, UINT message, WPARAM wparam, LPARAM lparam)
                         
                         f32 brightness = 3*(luminosity * luminosity) - 2*(luminosity * luminosity * luminosity);
                         
-                        umm slot = (umm)(brightness * ((sizeof(palette) / sizeof(palette[0])) - 1) + 0.5f);
-                        if (slot > (sizeof(palette) / sizeof(palette[0])) - 1) *(volatile int*)0;
+                        umm slot = (umm)(brightness * ((sizeof(palette) / sizeof(palette[0]) - 1) - 1) + 0.5f);
+                        if (slot > (sizeof(palette) / sizeof(palette[0]) - 1) - 1) *(volatile int*)0;
                         
                         TextOutW(bb_dc, (int)(x * char_size + char_size / 2), (int)(y * char_size + char_size / 2),
                                  &palette[slot], 1);
