@@ -2,7 +2,7 @@
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
-#include <strsafe.h>
+#include <commdlg.h>
 #include <shellapi.h>
 #undef NOMINMAX
 #undef WIN32_LEAN_AND_MEAN
@@ -37,7 +37,11 @@ typedef u8 bool;
 #define ERR_CODE (-(__COUNTER__))
 
 bool GlobalRunning = false;
-HBITMAP Bitmap  = 0;
+HBITMAP Bitmap     = 0;
+HBITMAP Backbuffer = 0;
+u32 OriginalWidth  = 0;
+u32 OriginalHeight = 0;
+bool ColorOn       = false;
 
 LRESULT CALLBACK
 WindowProc(HWND window_handle, UINT message, WPARAM wparam, LPARAM lparam)
@@ -58,13 +62,98 @@ WindowProc(HWND window_handle, UINT message, WPARAM wparam, LPARAM lparam)
         Bitmap = LoadImageW(0, file_name, IMAGE_BITMAP, 0, 0, LR_LOADFROMFILE | LR_CREATEDIBSECTION);
         
         if (Bitmap == 0) MessageBeep(MB_ICONERROR);
-        else InvalidateRect(window_handle, 0, 0);
+        else
+        {
+            DeleteObject(Backbuffer);
+            Backbuffer = 0;
+            
+            InvalidateRect(window_handle, 0, 0);
+        }
     }
     
-    else if (message == WM_SIZE || message == WM_SIZING)
+    else if (message == WM_KEYDOWN && wparam == 'N' && (GetKeyState(VK_CONTROL) & 0x8000) != 0)
     {
+        DeleteObject(Bitmap);
+        DeleteObject(Backbuffer);
+        Bitmap     = 0;
+        Backbuffer = 0;
+        SetWindowPos(window_handle, 0, 0, 0, OriginalWidth, OriginalHeight, SWP_NOMOVE | SWP_NOREPOSITION);
         InvalidateRect(window_handle, 0, 0);
-        UpdateWindow(window_handle);
+    }
+    
+    else if (message == WM_KEYDOWN && wparam == 'X' && (GetKeyState(VK_CONTROL) & 0x8000) != 0)
+    {
+        ColorOn = !ColorOn;
+        
+        DeleteObject(Backbuffer);
+        Backbuffer = 0;
+        InvalidateRect(window_handle, 0, 0);
+    }
+    
+    else if (message == WM_KEYDOWN && wparam == 'S' && (GetKeyState(VK_CONTROL) & 0x8000) != 0 && Bitmap != 0)
+    {
+        WCHAR path[1024] = {0};
+        LPWSTR path_wstr = path;
+        
+        OPENFILENAMEW open_file_name = {
+            .lStructSize    = sizeof(OPENFILENAMEW),
+            .hwndOwner      = window_handle,
+            .hInstance      = GetModuleHandleW(0),
+            .lpstrFilter    = L"Bitmap\0*.bmp\0\0",
+            .nFilterIndex   = 1,
+            .lpstrFile      = path_wstr,
+            .nMaxFile       = sizeof(path) / sizeof(WCHAR),
+            .lpstrTitle     = L"Save resulting bitmap",
+            .lpstrDefExt    = L".bmp",
+        };
+        
+        GetSaveFileNameW(&open_file_name);
+        
+        HANDLE file = CreateFileW(path, GENERIC_WRITE, 0, 0, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, 0);
+        
+        if (file != INVALID_HANDLE_VALUE)
+        {
+            BITMAP backbuffer;
+            if (GetObject(Backbuffer, sizeof(BITMAP), &backbuffer))
+            {
+                BITMAPINFO backbuffer_info = {
+                    .bmiHeader.biSize        = sizeof(BITMAPINFOHEADER),
+                    .bmiHeader.biWidth       = backbuffer.bmWidth,
+                    .bmiHeader.biHeight      = backbuffer.bmHeight,
+                    .bmiHeader.biPlanes      = backbuffer.bmPlanes,
+                    .bmiHeader.biBitCount    = backbuffer.bmBitsPixel,
+                    .bmiHeader.biCompression = BI_RGB,
+                    .bmiHeader.biSizeImage   = (((backbuffer.bmWidth * 24 + 31) & ~31) / 8) * backbuffer.bmHeight,
+                };
+                
+                void* bits = VirtualAlloc(0, backbuffer_info.bmiHeader.biSizeImage, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+                
+                // TODO: which dc?
+                HDC dc = GetDC(0);
+                SelectObject(dc, Backbuffer);
+                if (GetDIBits(dc, Backbuffer, 0, backbuffer_info.bmiHeader.biHeight, bits, &backbuffer_info, DIB_RGB_COLORS))
+                {
+                    BITMAPFILEHEADER header = {
+                        .bfType    = 0x4d42,
+                        .bfSize    = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER) + backbuffer_info.bmiHeader.biSizeImage,
+                        .bfOffBits = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER),
+                    };
+                    
+                    
+                    DWORD bytes_written;
+                    if (WriteFile(file, &header, sizeof(BITMAPFILEHEADER), &bytes_written, 0) &&
+                        WriteFile(file, &backbuffer_info.bmiHeader, sizeof(BITMAPINFOHEADER), &bytes_written, 0) &&
+                        WriteFile(file, bits, backbuffer_info.bmiHeader.biSizeImage, &bytes_written, 0))
+                    {
+                        
+                    }
+                }
+                
+                VirtualFree(bits, 0, MEM_RELEASE);
+            }
+            
+            CloseHandle(file);
+        }
     }
     
     else if (message == WM_PAINT)
@@ -96,41 +185,93 @@ WindowProc(HWND window_handle, UINT message, WPARAM wparam, LPARAM lparam)
         
         else
         {
-            HFONT font = CreateFontW(5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0,L"SYSTEM_FIXED_FONT");
-            HFONT prev_font = SelectObject(dc, font);
-            
-            TEXTMETRICW metrics;
-            GetTextMetrics(dc, &metrics);
-            
-            int char_size = metrics.tmAveCharWidth;
-            if (char_size < metrics.tmHeight) char_size = metrics.tmHeight;
-            
-            BITMAP bitmap_info;
-            GetObject(Bitmap, sizeof(BITMAP), &bitmap_info);
-            
-            SetWindowPos(window_handle, 0, 0, 0, char_size * bitmap_info.bmWidth, char_size * bitmap_info.bmHeight + GetSystemMetrics(SM_CYCAPTION), SWP_NOMOVE | SWP_NOREPOSITION);
-            
-            WCHAR palette[] = L" .:;~=#OB8%&";
-            
-            for (umm y = 0; y < bitmap_info.bmHeight; ++y)
+            if (Backbuffer != 0)
             {
-                for (umm x = 0; x < bitmap_info.bmWidth; ++x)
-                {
-                    u8* color_ptr = (u8*)bitmap_info.bmBits + (bitmap_info.bmHeight - (y + 1)) * bitmap_info.bmWidthBytes + x * 3;
-                    
-                    f32 luminosity = (0.2126f*color_ptr[0] + 0.7152f*color_ptr[1] + 0.0722f*color_ptr[2]) / 255;
-                    
-                    f32 brightness = 3*(luminosity * luminosity) - 2*(luminosity * luminosity * luminosity);
-                    
-                    umm slot = (umm)(brightness * ((sizeof(palette) / sizeof(palette[0])) - 1) + 0.5f);
-                    if (slot > (sizeof(palette) / sizeof(palette[0])) - 1) *(volatile int*)0;
-                    
-                    TextOutW(dc, (int)(x * char_size + char_size / 2), (int)(y * char_size + char_size / 2),
-                             &palette[slot], 1);
-                }
+                HDC bb_dc = CreateCompatibleDC(dc);
+                HBITMAP prev_bitmap = SelectObject(bb_dc, Backbuffer);
+                
+                BITMAP backbuffer_info;
+                GetObject(Backbuffer, sizeof(BITMAP), &backbuffer_info);
+                
+                BitBlt(dc, 0, 0, backbuffer_info.bmWidth, backbuffer_info.bmHeight, bb_dc, 0, 0, SRCCOPY);
+                
+                SelectObject(bb_dc, prev_bitmap);
+                DeleteDC(bb_dc);
             }
             
-            DeleteObject(SelectObject(dc, prev_font));
+            else
+            {
+                BITMAP bitmap_info;
+                GetObject(Bitmap, sizeof(BITMAP), &bitmap_info);
+                
+                HFONT font = CreateFontW(5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0,L"SYSTEM_FIXED_FONT");
+                HFONT prev_font = SelectObject(dc, font);
+                
+                TEXTMETRICW metrics;
+                GetTextMetrics(dc, &metrics);
+                
+                int char_size = metrics.tmAveCharWidth;
+                if (char_size < metrics.tmHeight) char_size = metrics.tmHeight;
+                
+                SetWindowPos(window_handle, 0, 0, 0, char_size * bitmap_info.bmWidth, char_size * bitmap_info.bmHeight + GetSystemMetrics(SM_CYCAPTION), SWP_NOMOVE | SWP_NOREPOSITION);
+                
+                GetClientRect(window_handle, &client_rect);
+                client_width  = client_rect.right  - client_rect.left;
+                client_height = client_rect.bottom - client_rect.top;
+                
+                DeleteObject(SelectObject(dc, prev_font));
+                
+                HDC bb_dc = CreateCompatibleDC(dc);
+                
+                font = CreateFontW(5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0,L"SYSTEM_FIXED_FONT");
+                prev_font = SelectObject(bb_dc, font);
+                
+                Backbuffer = CreateCompatibleBitmap(dc, client_width, client_height);
+                HBITMAP prev_bitmap = SelectObject(bb_dc, Backbuffer);
+                
+                SetBkColor(bb_dc, 0);
+                SetTextColor(bb_dc, 0x00FFFFFF);
+                
+                WCHAR palette[] = L" .:;~=#OB8%&";
+                
+                for (umm y = 0; y < bitmap_info.bmHeight; ++y)
+                {
+                    for (umm x = 0; x < bitmap_info.bmWidth; ++x)
+                    {
+                        u8* color_ptr = (u8*)bitmap_info.bmBits + (bitmap_info.bmHeight - (y + 1)) * bitmap_info.bmWidthBytes + x * 3;
+                        if (ColorOn)
+                        {
+                            f32 r = color_ptr[2] / 255.0f;
+                            f32 g = color_ptr[1] / 255.0f;
+                            f32 b = color_ptr[0] / 255.0f;
+                            
+                            r = 3*(r*r) - 2*(r*r*r);
+                            g = 3*(g*g) - 2*(g*g*g);
+                            b = 3*(b*b) - 2*(b*b*b);
+                            
+                            SetTextColor(bb_dc, (u32)(b*255) << 16 | (u32)(g*255) << 8 | (u32)(r*255));
+                        }
+                        
+                        f32 luminosity = (0.2126f*color_ptr[2] + 0.7152f*color_ptr[1] + 0.0722f*color_ptr[0]) / 255;
+                        
+                        f32 brightness = 3*(luminosity * luminosity) - 2*(luminosity * luminosity * luminosity);
+                        
+                        umm slot = (umm)(brightness * ((sizeof(palette) / sizeof(palette[0])) - 1) + 0.5f);
+                        if (slot > (sizeof(palette) / sizeof(palette[0])) - 1) *(volatile int*)0;
+                        
+                        TextOutW(bb_dc, (int)(x * char_size + char_size / 2), (int)(y * char_size + char_size / 2),
+                                 &palette[slot], 1);
+                    }
+                }
+                
+                DeleteObject(SelectObject(bb_dc, prev_font));
+                
+                SelectObject(bb_dc, prev_bitmap);
+                DeleteDC(bb_dc);
+                
+                InvalidateRect(window_handle, 0, false);
+                UpdateWindow(window_handle);
+            }
         }
         
         EndPaint(window_handle, &p);
@@ -171,6 +312,11 @@ wWinMain(HINSTANCE instance, HINSTANCE prev_instance, PWSTR arguments, int visib
         else
         {
             DragAcceptFiles(window_handle, true);
+            
+            RECT window_rect;
+            GetWindowRect(window_handle, &window_rect);
+            OriginalWidth  = window_rect.right  - window_rect.left;
+            OriginalHeight = window_rect.bottom - window_rect.top;
             
             GlobalRunning = true;
             while (GlobalRunning)

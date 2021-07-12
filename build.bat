@@ -6,6 +6,6 @@ set "link_options= /INCREMENTAL:NO /opt:ref"
 if NOT EXIST .\build mkdir build
 pushd .\build
 
-cl %compile_options% %defines% .\..\asciify.c /link %link_options% User32.lib Gdi32.lib Shell32.lib /out:asciify.exe
+cl %compile_options% %defines% .\..\asciify.c /link %link_options% User32.lib Gdi32.lib Shell32.lib Comdlg32.lib /out:asciify.exe
 
 popd
